@@ -1,8 +1,8 @@
 ARG BUILDER_IMAGE="golang"
-ARG BUILDER_VER="1.20.4-alpine3.18"
+ARG BUILDER_VER="1.22-alpine3.19"
 ARG ARCH="amd64"
 ARG OS="linux"
-ARG VER="0.4.1"
+ARG VER="0.5.0"
 
 FROM "${BUILDER_IMAGE}:${BUILDER_VER}" AS builder
 
@@ -24,9 +24,9 @@ ARG VER
 
 LABEL ORG="ArkCase LLC" \
       MAINTAINER="Armedia Devops Team <devops@armedia.com>" \
-      APP="ArkCase Core" \
+      APP="ArkCase Hostpath Provisioner for Kubernetes" \
       VERSION="${VER}"
 
 COPY --from=builder /hostpath-provisioner /hostpath-provisioner
 
-CMD [ "/hostpath-provisioner" ]
+ENTRYPOINT [ "/hostpath-provisioner" ]
