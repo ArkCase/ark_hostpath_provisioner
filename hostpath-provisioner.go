@@ -25,6 +25,7 @@ import (
 	"path"
 	filepath "path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -40,6 +41,12 @@ import (
 )
 
 const provisionerIdentityAnnotation = "hostpath/provisionerIdentity"
+const locationAnnotation = "hostpath/location"
+const pvcIdPatternAnnotation = "hostpath/pvcId-pattern"
+const pvcIdReplaceAnnotation = "hostpath/pvcId-replace"
+const pvcUidAnnotation = "hostpath/uid"
+const pvcGidAnnotation = "hostpath/gid"
+const pvcPermAnnotation = "hostpath/perm"
 
 // Fetch provisioner name from environment variable HOSTPATH_PROVISIONER_NAME
 // if not set uses default hostpath name
@@ -61,7 +68,7 @@ type HostPathProvisioner struct {
 
 	// The annotation name to look for within PVCs when a specific location is
 	// desired within the path tree
-	HostPathAnnotation string
+	LocationAnnotation string
 
 	// The annotation name to look for within PVCs which contains the regex
 	// with which to parse out the PVC ID from the PVC Name
@@ -70,6 +77,19 @@ type HostPathProvisioner struct {
 	// The annotation name to look for within PVCs which contains the replacement
 	// string (i.e. with $1, $2, etc) in order to produce the desired PVC ID value
 	PvcIdReplaceAnnotation string
+
+	// The annotation name to look for within PVCs which contains the UID that
+	// should be applied to the rendered volume
+	PvcUidAnnotation string
+
+	// The annotation name to look for within PVCs which contains the GID that
+	// should be applied to the rendered volume
+	PvcGidAnnotation string
+
+	// The annotation name to look for within PVCs which contains the permissions
+	// that should be applied to the rendered volume (can be an octal, decimal, hex, or
+	// rwx-blabla string)
+	PvcPermAnnotation string
 
 	// The directory at which the created volumes will be accessible to the pod
 	HostPathMount string
@@ -87,17 +107,29 @@ func NewHostPathProvisioner() controller.Provisioner {
 	if nodeHostPath == "" {
 		nodeHostPath = "/hostPath"
 	}
-	nodeHostPathAnnotation := os.Getenv("NODE_HOST_PATH_ANNOTATION")
-	if nodeHostPathAnnotation == "" {
-		nodeHostPathAnnotation = "hostpath/location"
+	nodeLocationAnnotation := os.Getenv("NODE_HOST_PATH_ANNOTATION")
+	if nodeLocationAnnotation == "" {
+		nodeLocationAnnotation = locationAnnotation
 	}
-	nodeHostPvcIdPatternAnnotation := os.Getenv("NODE_HOST_PVCID_PATTERN_ANNOTATION")
+	nodeHostPvcIdPatternAnnotation := os.Getenv("NODE_PVCID_PATTERN_ANNOTATION")
 	if nodeHostPvcIdPatternAnnotation == "" {
-		nodeHostPvcIdPatternAnnotation = "hostpath/pvcId-pattern"
+		nodeHostPvcIdPatternAnnotation = pvcIdPatternAnnotation
 	}
-	nodeHostPvcIdReplaceAnnotation := os.Getenv("NODE_HOST_PVCID_REPLACE_ANNOTATION")
+	nodeHostPvcIdReplaceAnnotation := os.Getenv("NODE_PVCID_REPLACE_ANNOTATION")
 	if nodeHostPvcIdReplaceAnnotation == "" {
-		nodeHostPvcIdReplaceAnnotation = "hostpath/pvcId-replace"
+		nodeHostPvcIdReplaceAnnotation = pvcIdReplaceAnnotation
+	}
+	nodePvcUidAnnotation := os.Getenv("NODE_PVC_UID_ANNOTATION")
+	if nodePvcUidAnnotation == "" {
+		nodePvcUidAnnotation = pvcUidAnnotation
+	}
+	nodePvcGidAnnotation := os.Getenv("NODE_PVC_GID_ANNOTATION")
+	if nodePvcGidAnnotation == "" {
+		nodePvcGidAnnotation = pvcGidAnnotation
+	}
+	nodePvcPermAnnotation := os.Getenv("NODE_PVC_PERM_ANNOTATION")
+	if nodePvcPermAnnotation == "" {
+		nodePvcPermAnnotation = pvcPermAnnotation
 	}
 	nodeHostPathMount := os.Getenv("NODE_HOST_PATH_MOUNT")
 	if nodeHostPathMount == "" {
@@ -109,10 +141,13 @@ func NewHostPathProvisioner() controller.Provisioner {
 	result := HostPathProvisioner{
 		PVDir:                  nodeHostPath,
 		Identity:               nodeName,
-		HostPathAnnotation:     nodeHostPathAnnotation,
+		LocationAnnotation:     nodeLocationAnnotation,
 		PvcIdPatternAnnotation: nodeHostPvcIdPatternAnnotation,
 		PvcIdReplaceAnnotation: nodeHostPvcIdReplaceAnnotation,
 		HostPathMount:          nodeHostPathMount,
+		PvcUidAnnotation:       nodePvcUidAnnotation,
+		PvcGidAnnotation:       nodePvcGidAnnotation,
+		PvcPermAnnotation:      nodePvcPermAnnotation,
 	}
 	yamlData, err := yaml.Marshal(result)
 	if err == nil {
@@ -125,6 +160,44 @@ func NewHostPathProvisioner() controller.Provisioner {
 
 var _ controller.Provisioner = &HostPathProvisioner{}
 
+func (p *HostPathProvisioner) parseId(options controller.ProvisionOptions, annotation string) (int64, error) {
+	id, ok := options.PVC.Annotations[annotation]
+	if ok {
+		if parsed, err := strconv.ParseInt(id, 10, 32); err == nil {
+			return parsed, nil
+		} else {
+			return -1, err
+		}
+	}
+	return -1, nil
+}
+
+func (p *HostPathProvisioner) applyPermissions(options controller.ProvisionOptions, finalPath string) error {
+	uid := -1
+	if parsedUid, uidErr := p.parseId(options, p.PvcUidAnnotation); uidErr == nil {
+		uid = int(parsedUid)
+	} else {
+		klog.Fatalf("\tInvalid UID for [%s]: %s", finalPath, uidErr)
+		return uidErr
+	}
+
+	gid := -1
+	if parsedGid, gidErr := p.parseId(options, p.PvcGidAnnotation); gidErr == nil {
+		gid = int(parsedGid)
+	} else {
+		klog.Fatalf("\tInvalid GID for [%s]: %s", finalPath, gidErr)
+		return gidErr
+	}
+
+	if uid >= 0 || gid >= 0 {
+		if err := os.Chown(finalPath, uid, gid); err != nil {
+			klog.Fatalf("\tFailed to set the ownership for [%s] to [%d:%d] failed: %s", finalPath, uid, gid, err)
+			return err
+		}
+	}
+	return nil
+}
+
 // Provision creates a storage asset and returns a PV object representing it.
 func (p *HostPathProvisioner) Provision(ctx context.Context, options controller.ProvisionOptions) (*v1.PersistentVolume, controller.ProvisioningState, error) {
 	relativePath := options.PVName
@@ -132,8 +205,8 @@ func (p *HostPathProvisioner) Provision(ctx context.Context, options controller.
 	// Allow the use of an annotation to request a specific location within the
 	// directory hierarchy. If the annotation isn't present, the original behavior
 	// is preserved.
-	if customPath, ok := options.PVC.Annotations[p.HostPathAnnotation]; ok {
-		klog.Infof("Computing the host path for PVC %s/%s from the %s annotation: [%s]", options.PVC.Namespace, options.PVC.Name, p.HostPathAnnotation, customPath)
+	if customPath, ok := options.PVC.Annotations[p.LocationAnnotation]; ok {
+		klog.Infof("Computing the host path for PVC %s/%s from the %s annotation: [%s]", options.PVC.Namespace, options.PVC.Name, p.LocationAnnotation, customPath)
 
 		// The default value if the hostpath annotation value is invalid
 		relativePath = customPath
@@ -183,14 +256,40 @@ func (p *HostPathProvisioner) Provision(ctx context.Context, options controller.
 			relativePath = customPath
 		}
 	} else {
-		klog.Infof("No %s annotation for PVC %s/%s, will use the default path: [%s]", p.HostPathAnnotation, options.PVC.Namespace, options.PVC.Name, relativePath)
+		klog.Infof("No %s annotation for PVC %s/%s, will use the default path: [%s]", p.LocationAnnotation, options.PVC.Namespace, options.PVC.Name, relativePath)
 	}
 	hostPath := path.Join(p.PVDir, relativePath)
 	volumeName := options.PVName
 
+	// Default permissions
+	permissions := os.FileMode.Perm(0755)
+
+	pvcPermissions, permissionsOk := options.PVC.Annotations[p.PvcPermAnnotation]
+	if permissionsOk && pvcPermissions != "" {
+		// Parse the permissions string! Must be an octal number!
+		if parsedPermissions, err := strconv.ParseUint(pvcPermissions, 8, 32); err == nil {
+			permissions = os.FileMode(parsedPermissions)
+			klog.Infof("\tWill set permissions [%s] for [%s]", pvcPermissions, hostPath)
+		} else {
+			klog.Fatalf("\tInvalid permissions [%s] for [%s]: %s", pvcPermissions, hostPath, err)
+			return nil, controller.ProvisioningFinished, err
+		}
+	}
+
+	finalPath := path.Join(p.HostPathMount, relativePath)
+
 	klog.Infof("Provisioning volume %s from PVC %s/%s at host path [%s]", volumeName, options.PVC.Namespace, options.PVC.Name, hostPath)
-	if err := os.MkdirAll(path.Join(p.HostPathMount, relativePath), 0775); err != nil {
+	if err := os.MkdirAll(finalPath, permissions); err != nil {
 		klog.Fatalf("\tProvisioning failed: %s", err)
+		return nil, controller.ProvisioningFinished, err
+	}
+
+	if err := os.MkdirAll(finalPath, permissions); err != nil {
+		klog.Fatalf("\tProvisioning failed: %s", err)
+		return nil, controller.ProvisioningFinished, err
+	}
+
+	if err := p.applyPermissions(options, finalPath); err != nil {
 		return nil, controller.ProvisioningFinished, err
 	}
 
