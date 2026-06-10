@@ -1,22 +1,29 @@
-ARG BUILDER_IMAGE="golang"
-ARG BUILDER_VER="1.22-alpine3.19"
+ARG VER="0.6.0"
 ARG ARCH="amd64"
 ARG OS="linux"
-ARG VER="0.5.0"
+
+ARG BUILDER_IMAGE="golang"
+ARG BUILDER_VER="1.26-alpine"
 
 FROM "${BUILDER_IMAGE}:${BUILDER_VER}" AS builder
 
-ARG SRCPATH="/build/hostpath-provisioner"
+ARG VER
+ARG ARCH
+ARG OS
+
+ENV SRC_PATH="/build/hostpath-provisioner"
 
 RUN apk --no-cache add git && \
-    mkdir -p "${SRCPATH}"
+    mkdir -p "${SRC_PATH}"
 
-ADD . "${SRCPATH}"
+ADD . "${SRC_PATH}"
 
-RUN cd "${SRCPATH}" && \
-    GO111MODULE=on \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -a -ldflags '-extldflags "-static"' -o /hostpath-provisioner
+ENV GO111MODULE=on
+ENV CGO_ENABLED=0
+ENV GOOS="${OS}"
+ENV GOARCH="${ARCH}"
+WORKDIR "${SRC_PATH}"
+RUN go build -a -ldflags '-extldflags "-static"' -o /hostpath-provisioner
 
 FROM scratch
 
