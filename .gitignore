@@ -1,2 +1,7 @@
+**/.sw?
+**/.*.sw?
+
+**/compliance*
+**/vulnerabilities*
+
 hostpath-provisioner
-tmp
